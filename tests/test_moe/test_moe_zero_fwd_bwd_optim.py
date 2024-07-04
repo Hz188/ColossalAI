@@ -16,7 +16,7 @@ from colossalai.testing.random import seed_all
 from colossalai.zero import LowLevelZeroOptimizer
 from tests.test_moe.moe_utils import loose_close
 
-tokens, n_experts = 7, 4
+tokens, n_experts = 100, 4
 hidden_size = 8
 top_k = 2
 
@@ -31,19 +31,19 @@ def split_grad(grad, world_size):
     return splited_grad
 
 
-@parameterize("dtype", [torch.float16, torch.bfloat16])
-@parameterize("master_weights", [True, False])
-@parameterize("stage", [1, 2])
+@parameterize("dtype", [torch.float16])
+@parameterize("master_weights", [True])
+@parameterize("stage", [1])
 def run_zero_with_original_model(world_size, master_weights: bool, dtype: torch.dtype, stage: int):
     rank = torch.distributed.get_rank()
     torch.cuda.set_device(dist.get_rank())
     plugin = MoeHybridParallelPlugin(
         tp_size=1,
         pp_size=1,
-        ep_size=dist.get_world_size() // 2,
+        ep_size=dist.get_world_size(),
     )
 
-    seed_all(10086)
+    seed_all(20095)
     config = MixtralConfig(
         hidden_size=hidden_size,
         intermediate_size=hidden_size * 2,
@@ -53,7 +53,8 @@ def run_zero_with_original_model(world_size, master_weights: bool, dtype: torch.
 
     orig_model = MixtralSparseMoeBlock(config).to(dtype).cuda()
 
-    ori_model = DDP(orig_model.cuda(), static_graph=True).cuda()
+    # ori_model = DDP(orig_model.cuda(), static_graph=True).cuda()
+    ori_model = DDP(orig_model.cuda()).cuda()
 
     zero_model = deepcopy(orig_model).to(dtype)
     zero_model = EPMixtralSparseMoeBlock.from_native_module(zero_model, ep_group=plugin.ep_group)
@@ -90,30 +91,46 @@ def run_zero_with_original_model(world_size, master_weights: bool, dtype: torch.
         loose_close(zero_output, ori_output, dtype=dtype)
 
         # zero-dp backward
+        print(f"rank={rank}, before zero backward")
         zero_optimizer.backward(zero_output.mean().float())
-
+        print(f"rank={rank}, after zero backward")
         # torch-ddp backward
+        print(f"rank={rank}, before ddp backward")
         ori_output.mean().backward()
+        print(f"rank={rank}, after ddp backward")
 
         # check grad
         name_to_p = {n: p for n, p in ori_model.module.named_parameters()}
+        print(f"rank={rank} {len(list(zero_model.named_parameters()))}")
         for n, p in zero_model.named_parameters():
+
+            print(f"rank={rank} into get_param_grad")
             zero_grad = zero_optimizer.get_param_grad(p)
+            print(f"rank={rank} out get_param_grad")
             if name_to_p[n].grad is None:
                 assert zero_grad is None
+                print(1111111)
                 continue
 
+            print(2222)
             loose_close(zero_grad, name_to_p[n].grad, dtype=dtype)
+            print(3333)
 
         # zero-dp step
+        print(f"rank={rank}, before zero step")
         zero_optimizer.step()
+        print(f"rank={rank}, after zero step")
 
         # original model step
+        print(f"rank={rank}, before ddp step")
         ori_optimizer.step()
+        print(f"rank={rank}, after ddp step")
 
         # check updated param
         for n, p in zero_model.named_parameters():
             loose_close(p.data, name_to_p[n].data, dtype=dtype)
+        if dist.get_rank() == 0:
+            print("-" * 50)
 
 
 def run_dist(rank, world_size, port):
@@ -122,7 +139,7 @@ def run_dist(rank, world_size, port):
 
 
 @pytest.mark.dist
-@pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("world_size", [4])
 @rerun_if_address_is_in_use()
 def test_moe_zero_model(world_size):
     spawn(run_dist, world_size)

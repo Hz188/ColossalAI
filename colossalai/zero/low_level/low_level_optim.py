@@ -295,14 +295,15 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
 
     def _run_reduction(self):
         for bucket_store in self.pg_to_bucket_store.values():
-            if bucket_store.num_elements_in_bucket() <= 0:
-                continue
+            # if bucket_store.num_elements_in_bucket() <= 0:
+            #     print(f"rank={dist.get_rank()}, bucket is empty")
+            #     continue
 
             bucket_store.build_grad_in_bucket()
 
             flat_grads = bucket_store.get_flatten_grad()
             flat_grads /= bucket_store.world_size
-
+            print(f"rank={dist.get_rank()}, flat_grads: {flat_grads.shape}")
             # ready to add other tensors to bucket
             bucket_store.reset_num_elements_in_bucket()
 
@@ -413,8 +414,9 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
 
         if not self.require_grad_sync:
             return
-
+        print(f"rank={dist.get_rank()}, before _reduce_grad")
         self._reduce_grad(self._partition_grads)
+        print(f"rank={dist.get_rank()}, after _reduce_grad")
 
         # clear reduced grads
         if self._overlap_communication:
@@ -863,9 +865,12 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
         grad_store = self.pid_to_grad_store[id(working_param)]
         partial_grad = grad_store.get_working_grad_by_param_id(id(working_param))
         if partial_grad is None:
+            print(f"rank={dist.get_rank()} return here")
             return None
         tensor_list = [torch.empty_like(partial_grad) for _ in range(grad_store.world_size)]
+        print(f"rank={dist.get_rank()} before get_param_grad")
         dist.all_gather(tensor_list, partial_grad, group=grad_store.torch_pg)
+        print(f"rank={dist.get_rank()} after get_param_grad")
         grad_flat = torch.cat(tensor_list, dim=0)
         return grad_flat[: working_param.numel()].reshape_as(working_param)
 
